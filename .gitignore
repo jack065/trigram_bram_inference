@@ -1,4 +1,3 @@
-sim_tri
-sim_mem
-tri.vcd
+sim_*
+*.vcd
 __pycache__/
