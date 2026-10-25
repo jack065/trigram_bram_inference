@@ -5,14 +5,17 @@ module accum(
     input wire reset,
     input wire tri_valid,
     input wire [10:0] bucket,
+    input wire tri_last,
 
-    output reg signed [31:0] acc0, acc1, acc2, acc3
+    output reg signed [31:0] acc0, acc1, acc2, acc3,
+    output reg done
 );
 
     wire [31:0] w_word;
     reg [31:0] bias [0:3];
     wire [31:0] w0, w1, w2, w3;
     reg w_valid;
+    reg w_last;
 
     weight_rom rom(
         .clk(clk),
@@ -31,12 +34,16 @@ module accum(
 
     always @(posedge clk) begin
         w_valid <= tri_valid;
+        w_last <= tri_last;
+        done <= w_last;
         if (reset) begin
             acc0 <= bias[0];
             acc1 <= bias[1];
             acc2 <= bias[2];
             acc3 <= bias[3];
             w_valid <= 0;
+            w_last <= 0;
+            done <= 0;
         end
         else if (w_valid) begin
             acc0 <= acc0 + w0;

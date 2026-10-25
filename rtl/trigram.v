@@ -5,6 +5,9 @@ module trigram(
     input wire reset,
     input wire in_valid,
     input wire [7:0] in_byte,
+    input wire in_last,
+
+    output reg tri_last,
     output reg tri_valid,
     output reg [7:0] b0, 
     output reg [7:0] b1, 
@@ -31,10 +34,12 @@ module trigram(
         if (reset) begin
             count <= 3'd0;
             tri_valid <= 1'b0;
+            tri_last <= 1'b0;
         end
         else begin
             tri_valid <= 1'b0;
-
+            tri_last <= 1'b0;
+            
             if (in_valid && !is_punct) begin
                 b2 <= norm_byte;
                 b1 <= b2;
@@ -44,6 +49,13 @@ module trigram(
                 end
                 if (count == 3'd2) begin
                     tri_valid <= 1'b1;
+                end
+            end
+
+            if (in_valid && in_last) begin
+                tri_last <= 1'b1;
+                if (in_last == 1'b1) begin
+                    count <= 1'b0;
                 end
             end
         end
