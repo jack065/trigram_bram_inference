@@ -72,8 +72,6 @@ module tb_top;
         $finish;
     end
 
-
-
     initial begin
         reset = 1;
         in_valid = 0;
