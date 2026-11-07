@@ -1,4 +1,5 @@
 `timescale 1ns / 1ps
+`default_nettype none
 
 module trigram(
     input wire clk,
@@ -62,3 +63,5 @@ module trigram(
     end
 
 endmodule
+
+`default_nettype wire

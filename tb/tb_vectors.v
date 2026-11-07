@@ -37,8 +37,8 @@ module tb_vectors;
     integer r;
     integer value;
     reg signed [31:0] exp0, exp1, exp2, exp3;
+    reg signed [31:0] s_acc0, s_acc1, s_acc2, s_acc3;
     
-
     initial begin
         clk = 0;
         forever #5 clk = ~clk; // 100MHz clock
@@ -75,6 +75,11 @@ module tb_vectors;
                 r = $fscanf(fd, "%h", value);
                 send_byte(value[7:0], curr == len - 1);
             end
+            while (done !== 1'b1) @(negedge clk);
+            s_acc0 = acc0;
+            s_acc1 = acc1;
+            s_acc2 = acc2;
+            s_acc3 = acc3;
             while (cls_valid !== 1'b1) @(negedge clk);
         end
     endtask
@@ -90,7 +95,7 @@ module tb_vectors;
             r = $fscanf(fd, "%h", exp_argmax);
             r = $fscanf(fd, "%h", exp_cls);
 
-            if ((acc0 !== exp0) || (acc1 !== exp1) || (acc2 !== exp2) || (acc3 !== exp3) || (argmax !== exp_argmax) || (cls !== exp_cls)) begin
+            if ((s_acc0 !== exp0) || (s_acc1 !== exp1) || (s_acc2 !== exp2) || (s_acc3 !== exp3) || (argmax !== exp_argmax) || (cls !== exp_cls)) begin
                 $display("Error at %0d", n_sent);
                 $display("--- Expected Values ---");
                 $display("acc0 -> Expected: %0d, Got: %0d", exp0, acc0);
@@ -122,8 +127,8 @@ module tb_vectors;
             
             $finish;
         end
+        do_reset;
         while ($fscanf(fd, "%h", len) == 1) begin
-            do_reset;
             run_sentence;
             check_result;
             n_sent = n_sent + 1;

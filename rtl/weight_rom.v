@@ -1,4 +1,5 @@
 `timescale 1ns / 1ps
+`default_nettype none
 
 module weight_rom(
     input wire clk,
@@ -19,3 +20,5 @@ module weight_rom(
     end
 
 endmodule
+
+`default_nettype wire

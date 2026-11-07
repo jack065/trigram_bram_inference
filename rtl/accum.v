@@ -1,4 +1,5 @@
 `timescale 1ns / 1ps
+`default_nettype none
 
 module accum(
     input wire clk,
@@ -51,7 +52,14 @@ module accum(
             acc2 <= acc2 + w2;
             acc3 <= acc3 + w3;
         end
-        
+        else if (done) begin
+            acc0 <= bias[0];
+            acc1 <= bias[1];
+            acc2 <= bias[2];
+            acc3 <= bias[3];
+        end
     end
 
 endmodule
+
+`default_nettype wire

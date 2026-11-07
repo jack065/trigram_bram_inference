@@ -1,4 +1,5 @@
 `timescale 1ns / 1ps
+`default_nettype none
 
 module mem_check(
     input  wire clk,
@@ -53,3 +54,5 @@ module mem_check(
         end
     end
 endmodule
+
+`default_nettype wire

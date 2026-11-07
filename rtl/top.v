@@ -1,4 +1,5 @@
 `timescale 1ns / 1ps
+`default_nettype none
 
 module top(
     input wire clk,
@@ -55,3 +56,5 @@ module top(
     );
 
 endmodule
+
+`default_nettype wire
