@@ -8,7 +8,9 @@ module top(
     input wire in_last,
 
     output wire signed [31:0] acc0, acc1, acc2, acc3,
-    output wire done
+    output wire done,
+    output wire [1:0] argmax, cls,
+    output wire cls_valid
 );
 
     wire tri_valid;
@@ -38,4 +40,18 @@ module top(
         .acc3(acc3),
         .done(done)
     );
+
+    classify rom3(
+        .clk(clk),
+        .reset(reset),
+        .start(done),
+        .acc0(acc0),
+        .acc1(acc1),
+        .acc2(acc2),
+        .acc3(acc3),
+        .argmax(argmax),
+        .cls(cls),
+        .cls_valid(cls_valid)
+    );
+
 endmodule

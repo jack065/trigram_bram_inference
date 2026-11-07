@@ -10,6 +10,8 @@ module tb_vectors;
     wire done;
 
     wire signed [31:0] acc0, acc1, acc2, acc3;
+    wire [1:0] argmax, cls;
+    wire cls_valid;
 
     top uut (
         .clk(clk),
@@ -22,7 +24,10 @@ module tb_vectors;
         .acc1(acc1),
         .acc2(acc2),
         .acc3(acc3),
-        .done(done)
+        .done(done),
+        .argmax(argmax),
+        .cls(cls),
+        .cls_valid(cls_valid)
     );
 
     integer errors;
@@ -32,6 +37,7 @@ module tb_vectors;
     integer r;
     integer value;
     reg signed [31:0] exp0, exp1, exp2, exp3;
+    
 
     initial begin
         clk = 0;
@@ -69,27 +75,30 @@ module tb_vectors;
                 r = $fscanf(fd, "%h", value);
                 send_byte(value[7:0], curr == len - 1);
             end
-            while (done !== 1'b1) @(negedge clk);
+            while (cls_valid !== 1'b1) @(negedge clk);
         end
     endtask
 
     task check_result;
+        reg [1:0] exp_argmax, exp_cls;
         begin
             r = $fscanf(fd, "%h", exp0);
             r = $fscanf(fd, "%h", exp1);
             r = $fscanf(fd, "%h", exp2);
             r = $fscanf(fd, "%h", exp3);
 
-            r = $fscanf(fd, "%h", value);
-            r = $fscanf(fd, "%h", value);
+            r = $fscanf(fd, "%h", exp_argmax);
+            r = $fscanf(fd, "%h", exp_cls);
 
-            if ((acc0 !== exp0) || (acc1 !== exp1) || (acc2 !== exp2) || (acc3 !== exp3)) begin
+            if ((acc0 !== exp0) || (acc1 !== exp1) || (acc2 !== exp2) || (acc3 !== exp3) || (argmax !== exp_argmax) || (cls !== exp_cls)) begin
                 $display("Error at %0d", n_sent);
                 $display("--- Expected Values ---");
                 $display("acc0 -> Expected: %0d, Got: %0d", exp0, acc0);
                 $display("acc1 -> Expected: %0d, Got: %0d", exp1, acc1);
                 $display("acc2 -> Expected: %0d, Got: %0d", exp2, acc2);
                 $display("acc3 -> Expected: %0d, Got: %0d", exp3, acc3);
+                $display("argmax -> Expected: %0d, Got: %0d", exp_argmax, argmax);
+                $display("cls -> Expected: %0d, Got: %0d", exp_cls, cls);
                 errors = errors + 1;
             end
         end
