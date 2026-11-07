@@ -14,14 +14,13 @@ module classify(
 
     `include "hw/model_params.vh"
 
-    reg v1, v2, v3, v4;
+    reg v1, v2, v3, v4, v5, v6;
     reg signed [31:0] max01, max23, max;
-    reg [1:0] idx01, idx23, s2_argmax, s3_argmax, s4_argmax;
+    reg [1:0] idx01, idx23, s2_argmax, s3_argmax, s4_argmax, s5_argmax, s6_argmax;
 
     wire signed [31:0] diff0, diff1, diff2, diff3;
     reg [10:0] addr0, addr1, addr2, addr3;
-    reg signed [31:0] s1_acc0, s1_acc1, s1_acc2, s1_acc3, s2_acc0, s2_acc1, s2_acc2, s2_acc3;
-
+    reg signed [31:0] s1_acc0, s1_acc1, s1_acc2, s1_acc3, s2_acc0, s2_acc1, s2_acc2, s2_acc3, d0, d1, d2, d3;
 
     assign diff0 = max - s2_acc0;
     assign diff1 = max - s2_acc1;
@@ -57,10 +56,10 @@ module classify(
     wire [15:0] m0, m1, m2, m3;
     wire [17:0] sum;
 
-    assign m0 = (s4_argmax == 2'd0) ? 0: e0;
-    assign m1 = (s4_argmax == 2'd1) ? 0: e1;
-    assign m2 = (s4_argmax == 2'd2) ? 0: e2;
-    assign m3 = (s4_argmax == 2'd3) ? 0: e3;
+    assign m0 = (s6_argmax == 2'd0) ? 0: e0;
+    assign m1 = (s6_argmax == 2'd1) ? 0: e1;
+    assign m2 = (s6_argmax == 2'd2) ? 0: e2;
+    assign m3 = (s6_argmax == 2'd3) ? 0: e3;
 
     assign sum = m0 + m1 + m2 + m3;
 
@@ -70,7 +69,7 @@ module classify(
             v2 <= 0;
             v3 <= 0;
             v4 <= 0;
-
+            v5 <= 0;
             cls_valid <= 0;
         end
         else begin
@@ -78,7 +77,9 @@ module classify(
             v2 <= v1;
             v3 <= v2;
             v4 <= v3;
-            cls_valid <= v4;
+            v5 <= v4;
+            v6 <= v5;
+            cls_valid <= v6;
 
             if (start) begin
                 s1_acc0 <= acc0;
@@ -121,23 +122,35 @@ module classify(
 
             if (v2) begin
                 s3_argmax <= s2_argmax;
-                addr0 <= (diff0 > 2047) ? 2047 : diff0[10:0];
-                addr1 <= (diff1 > 2047) ? 2047 : diff1[10:0];
-                addr2 <= (diff2 > 2047) ? 2047 : diff2[10:0];
-                addr3 <= (diff3 > 2047) ? 2047 : diff3[10:0];
+                d0 <= diff0;
+                d1 <= diff1;
+                d2 <= diff2;
+                d3 <= diff3;
             end
 
             if (v3) begin
                 s4_argmax <= s3_argmax;
+                addr0 <= (| d0[31:11]) ? 2047 : d0[10:0];
+                addr1 <= (| d1[31:11]) ? 2047 : d1[10:0];
+                addr2 <= (| d2[31:11]) ? 2047 : d2[10:0];
+                addr3 <= (| d3[31:11]) ? 2047 : d3[10:0];
             end
 
             if (v4) begin
-                argmax <= s4_argmax;
-                if ((s4_argmax == 2'd3) || (sum > THRESH_SUM)) begin
+                s5_argmax <= s4_argmax;
+            end
+
+            if (v5) begin
+                s6_argmax <= s5_argmax;
+            end
+
+            if (v6) begin
+                argmax <= s6_argmax;
+                if ((s6_argmax == 2'd3) || (sum > THRESH_SUM)) begin
                     cls <= 2'd3;
                 end
                 else begin
-                    cls <= s4_argmax;
+                    cls <= s6_argmax;
                 end
             end
         end

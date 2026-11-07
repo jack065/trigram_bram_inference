@@ -8,7 +8,7 @@ module weight_rom(
 );
 
     // Building the memory array
-    reg [31:0] weight_mem [0:2047];
+    (* rom_style = "block" *) reg [31:0] weight_mem [0:2047];
 
     initial begin
         $readmemh("hw/weights.mem", weight_mem);
