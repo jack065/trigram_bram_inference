@@ -19,7 +19,8 @@ EXP_FRAC_BITS = 16
 N_CLINC_VECTORS = 460
 PUNCT = set(b'!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~')
 EDGE_CASES = ['a', 'ab', 'abc', '!!!', 'A.B.C.D', 'BOOK A FLIGHT TO BOSTON!!!',
-              'how many calories in a banana ' * 8, '   ', 'x?y?z?w']
+              'how many calories in a banana ' * 8, '   ', 'x?y?z?w', 'Book me a flight from Boston to Denver next Friday.', 'a',
+              'Find me a hotel in Paris for two nights.', 'ab', 'How many calories are in an apple?', 'a']
 
 def normalize_bytes(data):
     # What the RTL does per byte: drop ASCII punctuation, lowercase A-Z.

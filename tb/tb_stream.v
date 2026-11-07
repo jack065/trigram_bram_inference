@@ -44,13 +44,13 @@ module tb_stream;
     reg signed [31:0] exp0, exp1, exp2, exp3;
     reg signed [31:0] s_acc0, s_acc1, s_acc2, s_acc3;
 
-    reg signed [31:0] exp_acc0 [0:511];
-    reg signed [31:0] exp_acc1 [0:511];
-    reg signed [31:0] exp_acc2 [0:511];
-    reg signed [31:0] exp_acc3 [0:511];
+    reg signed [31:0] exp_acc0 [0:1023];
+    reg signed [31:0] exp_acc1 [0:1023];
+    reg signed [31:0] exp_acc2 [0:1023];
+    reg signed [31:0] exp_acc3 [0:1023];
 
-    reg [1:0] exp_argmax [0:511];
-    reg [1:0] exp_cls [0:511];
+    reg [1:0] exp_argmax [0:1023];
+    reg [1:0] exp_cls [0:1023];
     
     initial begin
         clk = 0;
