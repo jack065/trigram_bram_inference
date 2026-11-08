@@ -11,7 +11,8 @@ module top_axis(
     output wire [31:0] m_axis_tdata,
     output wire m_axis_tvalid,
     output wire m_axis_tlast,
-    output wire s_axis_tready
+    output wire s_axis_tready,
+    output wire m_axis_tkeep
 );
 
     wire [7:0] in_byte;
@@ -37,6 +38,8 @@ module top_axis(
     assign m_axis_tvalid = (fifo_count != 0);
     assign m_axis_tdata = fifo_out[31:0];
     assign m_axis_tlast = fifo_out[32];
+
+    assign m_axis_tkeep = 4'b1111;
 
     top u_top(
         .clk(aclk),

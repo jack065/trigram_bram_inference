@@ -196,3 +196,78 @@ def run(chip=None, folder='.', clock_mhz=142.857, repeats=3):
               f'{statistics.median(cycles):.0f} cycles = '
               f'{statistics.median(cycles) / clock_mhz:.1f} us at {clock_mhz} MHz')
     return results
+
+
+def fclk0_mhz(default=142.857):
+    """The actual PL clock on the board, if PYNQ can tell us."""
+    try:
+        from pynq import Clocks
+        return Clocks.fclk0_mhz
+    except Exception:
+        return default
+
+
+def best_time(fn, repeats):
+    """Best wall-clock time of fn() over several runs (microseconds)."""
+    best = float('inf')
+    for _ in range(repeats):
+        t0 = time.perf_counter()
+        fn()
+        best = min(best, time.perf_counter() - t0)
+    return best * 1e6
+
+
+def run_dma(dma, folder='.', repeats=5, batch_sizes=(1, 10, 100, 514, 4112)):
+    """ARM vs FPGA through AXI-Stream + DMA, for growing batch sizes.
+
+    dma is a bram_dma.BramDma. Batches larger than the vector set repeat it."""
+    from bram_dma import encode_batch
+
+    m = Model(folder)
+    vectors = load_vectors(f'{folder}/vectors.txt')
+    texts = [v[0] for v in vectors]
+    exp_cls = np.array([v[3] for v in vectors])
+    exp_argmax = np.array([v[2] for v in vectors])
+    clock = fclk0_mhz()
+
+    print('== Correctness (class and argmax) ==')
+    errors = 0
+    for first, count in [(0, len(texts)), (0, 1), (1, 2), (3, 7), (10, 50)]:
+        cls, argmax = dma.classify_batch(texts[first:first + count])
+        bad = int(np.sum((cls != exp_cls[first:first + count]) |
+                         (argmax != exp_argmax[first:first + count])))
+        errors += bad
+        print(f'batch of {count:4d} sentences: {bad} errors')
+    print(f'FPGA via DMA     {errors} errors in total')
+
+    print(f'\n== Timing by batch size (best of {repeats} runs, PL clock {clock:.3f} MHz) ==')
+    print(f"{'batch':>6s} {'bytes':>7s} {'ARM Python us':>14s} {'ARM NumPy us':>13s} "
+          f"{'DMA us':>9s} {'DMA us/sent':>12s} {'DMA MB/s':>9s} {'vs Python':>10s} {'core us':>8s}")
+    rows = []
+    for size in batch_sizes:
+        batch = [texts[i % len(texts)] for i in range(size)]
+        nbytes = sum(len(t) for t in batch)
+        words = encode_batch(batch)
+
+        t_py = best_time(lambda: [cpu_python(t, m) for t in batch], repeats if size <= 514 else 1)
+        t_np = best_time(lambda: [cpu_numpy(t, m) for t in batch], repeats if size <= 514 else 1)
+        # Full DMA path as a user would call it: encode + transfer + decode.
+        t_dma = best_time(lambda: dma.classify_batch(batch), repeats)
+        # The chip itself, bytes back to back: one byte per clock + 9 cycles after the last.
+        t_core = (nbytes + 9) / clock
+
+        rows.append((size, nbytes, t_py, t_np, t_dma, t_core))
+        print(f'{size:6d} {nbytes:7d} {t_py:14.0f} {t_np:13.0f} {t_dma:9.0f} '
+              f'{t_dma / size:12.2f} {nbytes / t_dma:9.2f} {t_py / t_dma:9.1f}x {t_core:8.1f}')
+
+    # Where the DMA time goes for the largest batch.
+    size, nbytes = rows[-1][0], rows[-1][1]
+    batch = [texts[i % len(texts)] for i in range(size)]
+    words = encode_batch(batch)
+    t_encode = best_time(lambda: encode_batch(batch), repeats)
+    t_transfer = best_time(lambda: dma.run_words(words, size), repeats)
+    print(f'\nLargest batch ({size} sentences, {nbytes} bytes):')
+    print(f'  encode in Python   {t_encode:9.0f} us')
+    print(f'  DMA transfers      {t_transfer:9.0f} us  ({nbytes / t_transfer:.1f} MB/s, '
+          f'chip limit {clock:.1f} MB/s)')
+    return rows

@@ -3,3 +3,4 @@ sim_*
 __pycache__/
 vivado_bram_chip/
 bram_axi_bus/
+bram_axi_stream/

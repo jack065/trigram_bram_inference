@@ -85,9 +85,12 @@ The decision is spread over 7 pipeline stages so that each clock cycle does only
 | `rtl/classify.v` | 7-stage decision pipeline: argmax, exp LUT confidence, threshold → `cls` |
 | `rtl/top.v` | Connects `trigram`, `accum` and `classify` |
 | `rtl/top_axi.v` | AXI4-Lite wrapper around `top`, so the Zynq's ARM processor can send text and read results (see [Register map](#register-map)) |
-| `tb/` | One testbench per module, plus `tb_vectors.v` (full regression, one sentence at a time), `tb_stream.v` (full regression with sentences streaming back to back) and `tb_axi.v` (the AXI4-Lite wrapper, driven like the ARM would) |
-| `board/bram_chip.py` | Python driver for the PYNQ-Z2: loads the bitstream, sends sentences, reads results, runs the regression on hardware |
-| `board/bench.py` | Benchmark: the same model in plain Python, in NumPy, and on the FPGA, checked for identical answers and timed |
+| `rtl/top_axis.v` | AXI-Stream wrapper around `top` for use with a DMA: bytes stream in, one result word per sentence streams out (see [Stream formats](#stream-formats)) |
+| `rtl/fifo.v` | 64-entry result FIFO used by `top_axis`, so results wait when the receiving DMA isn't ready |
+| `tb/` | One testbench per module, plus `tb_vectors.v` (full regression, one sentence at a time), `tb_stream.v` (full regression with sentences streaming back to back), `tb_axi.v` (the AXI4-Lite wrapper, driven like the ARM would), `tb_fifo.v` (the FIFO against a reference queue) and `tb_axis.v` (the stream wrapper, driven like the two DMA channels, with random stalls) |
+| `board/bram_chip.py` | Python driver for the AXI4-Lite version: loads the bitstream, sends sentences, reads results, runs the regression on hardware |
+| `board/bram_dma.py` | Python driver for the AXI-Stream + DMA version: classifies a whole batch of sentences in one DMA transfer |
+| `board/bench.py` | Benchmark: the same model in plain Python, in NumPy, and on the FPGA (both versions), checked for identical answers and timed |
 | `build.tcl` | Recreates the Vivado project: part, sources, include directory, constraint, out-of-context synthesis |
 | `timing.xdc` | Clock constraint (150 MHz) |
 | `clinc150/` | CLINC150 dataset |
@@ -146,7 +149,17 @@ vvp sim_str
 # AXI4-Lite wrapper (self-checking: prints ALL TESTS PASSED)
 iverilog -o sim_axi rtl/trigram.v rtl/weight_rom.v rtl/accum.v rtl/exp_rom.v rtl/classify.v rtl/top.v rtl/top_axi.v tb/tb_axi.v
 vvp sim_axi
+
+# Result FIFO (self-checking: prints ALL TESTS PASSED)
+iverilog -o sim_fifo rtl/fifo.v tb/tb_fifo.v
+vvp sim_fifo
+
+# AXI-Stream wrapper (self-checking: prints ALL TESTS PASSED)
+iverilog -o sim_axis rtl/trigram.v rtl/weight_rom.v rtl/accum.v rtl/exp_rom.v rtl/classify.v rtl/top.v rtl/fifo.v rtl/top_axis.v tb/tb_axis.v
+vvp sim_axis
 ```
+
+`tb_axis` acts like both DMA channels. It sends all 514 sentences as one batch at full speed, then in batches of 1, 2, 7, 50 and the rest with random stalls on both sides, then stalls the receiver for 2000 cycles while 100 one-byte sentences arrive, which forces backpressure. It checks every result word and that `TLAST` lands on exactly the last result of each batch. Deliberately broken versions of the wrapper (no backpressure, no `TLAST`, input not gated by `TREADY`, a FIFO count bug) all fail it.
 
 The two regressions are the main checks. Expected output:
 
@@ -202,7 +215,14 @@ report_utilization -hierarchical
 
 ### 4. Run on the PYNQ-Z2
 
-#### Build the board design in Vivado
+There are two board versions of the chip. They share the same core (`rtl/top.v`) and differ only in how the ARM processor gets data in and out:
+
+| Version | Wrapper | How data moves | Best for |
+|---|---|---|---|
+| AXI4-Lite | `top_axi` | Python writes one byte per register write, then reads the result | one sentence at a time, reading the scores |
+| AXI-Stream + DMA | `top_axis` | a DMA engine streams a whole batch from memory and writes the results back | throughput: many sentences per call |
+
+#### AXI4-Lite version: build the board design in Vivado
 
 A separate Vivado project, targeting the **PYNQ-Z2 board** (the PYNQ-Z2 board files are needed for this one):
 
@@ -259,6 +279,41 @@ results = bench.run(chip)
 
 The chip's `cls_valid` lasts only one clock cycle, so the wrapper latches each result and holds "result ready" until Python clears it. A sentence goes: clear, write each byte, poll STATUS, read the result.
 
+#### AXI-Stream + DMA version: build the board design in Vivado
+
+Another PYNQ-Z2 board project, set up like the AXI4-Lite one (files from `rtl/` including `fifo.v` and `top_axis.v`, files from `hw/`, the repository root as include directory, no `timing.xdc`):
+
+1. Add the **ZYNQ7 Processing System** and run **Block Automation** with **Apply Board Preset** ticked. In its settings, set **FCLK_CLK0** to 150 MHz, and enable **PS-PL Configuration → HP Slave AXI Interface → S AXI HP0**, the high-speed port the DMA uses to reach DDR memory.
+2. Add **AXI Direct Memory Access**: scatter-gather **off**, **width of buffer length register 26 bits** (the default 14 bits limits a transfer to 16 KB), MM2S stream width **16**, S2MM stream width **32**.
+3. **Add Module → `top_axis`**, and connect the streams by hand: DMA `M_AXIS_MM2S` → `top_axis` `s_axis`, and `top_axis` `m_axis` → DMA `S_AXIS_S2MM`.
+4. **Run Connection Automation** with every option ticked. Then check that **both** of the DMA's memory ports, `M_AXI_MM2S` **and** `M_AXI_S2MM`, connect to `S_AXI_HP0`, and that both have an `HP0_DDR_LOWOCM` entry in the **Address Editor**. If `M_AXI_S2MM` is left unconnected, the DMA can read the text but never write results back: the receive transfer hangs, and `top_axis`'s FIFO fills until backpressure stops the input too.
+5. Validate, **Create HDL Wrapper**, set it as top, generate the bitstream, and copy the `.bit` and `.hwh` to the board as **`bram_dma.bit`** and **`bram_dma.hwh`**, together with `board/bram_dma.py`.
+
+#### Stream formats
+
+| Stream | Width | Contents |
+|---|---|---|
+| Input (DMA → `top_axis`) | 16 bits per byte | [7:0] byte, [8] last byte of a sentence. The DMA sets `TLAST` on the last element of the buffer. |
+| Output (`top_axis` → DMA) | 32 bits per sentence | [1:0] class, [3:2] argmax. `top_axis` sets `TLAST` on the last sentence's result, which completes the receive transfer. |
+
+Sentence boundaries travel inside the data (bit 8) because the DMA only marks the end of a whole buffer. `top_axis` counts sentences in and results out to find which result gets `TLAST`. So each batch must be fully received before the next one starts, which the driver always does.
+
+#### Use the DMA version from Python
+
+```python
+from bram_dma import BramDma, LABELS
+import bench
+
+dma = BramDma("bram_dma.bit")
+cls, argmax = dma.classify("Book me a flight from Boston to Denver next Friday.")
+print(LABELS[cls])                                   # book_flight
+
+classes, argmaxes = dma.classify_batch(list_of_sentences)   # one DMA transfer for the whole batch
+rows = bench.run_dma(dma)                            # correctness + timing by batch size
+```
+
+The driver allocates DMA buffers of exactly the batch's size and reuses them while the size stays the same. PYNQ 2.5's DMA driver always transfers whole buffers.
+
 ## Status
 
 - [x] Train and quantize the model, export the memory files
@@ -277,11 +332,16 @@ The chip's `cls_valid` lasts only one clock cycle, so the wrapper latches each r
 - [x] AXI4-Lite wrapper (`rtl/top_axi.v`), verified in simulation through the bus alone (`tb/tb_axi.v`)
 - [x] Running on the PYNQ-Z2 with the Zynq's ARM processor: 514 sentences, 0 errors on real hardware
 - [x] ARM vs FPGA benchmark on the board (`board/bench.py`)
+- [x] AXI-Stream wrapper with result FIFO and backpressure (`rtl/top_axis.v`, `rtl/fifo.v`), verified with random stalls (`tb/tb_axis.v`, `tb/tb_fifo.v`)
+- [x] AXI-Stream + DMA version running on the PYNQ-Z2: 0 errors, about 50× faster than the ARM for large batches
 
 ## TODO
 
-- [ ] **AXI-Stream + DMA interface:** stream whole buffers of text into the chip at one byte per clock, instead of one AXI4-Lite write per byte (see [Performance](#performance-on-the-board))
-- [ ] A build script for the board project (block design, board files, include directory), like `build.tcl` for the out-of-context build
+- [ ] **Find sentence boundaries in hardware:** accept plain text with newlines as an 8-bit stream, so Python no longer builds the 16-bit array (82% of the time for large batches) and half as many bytes cross the DMA
+- [ ] **Reduce the fixed cost per DMA call** (about 1.1 ms): buffers that bypass the CPU cache, or writing the DMA registers directly instead of going through PYNQ 2.5's driver
+- [ ] Re-apply the board preset in the DMA project, so the logic clock is 142.857 MHz instead of 125 MHz
+- [ ] Derive the backpressure threshold in `top_axis` (`fifo_count < 48`) from the pipeline depth, and check the worst case in simulation
+- [ ] A build script for the board projects (block design, board files, include directory), like `build.tcl` for the out-of-context build
 - [ ] **Try 200 MHz:** run at a 5 ns clock and fix the slowest paths (likely candidates: the weight BRAM output register, splitting S5, narrower accumulators)
 - [ ] Make `tb_top.v` and `tb_accum.v` self-checking (PASS/FAIL instead of printed values)
 - [ ] Cleanup: shrink `count` in `trigram.v` to 2 bits, and rename the instances in `top.v` (`rom1`/`rom2`/`rom3`)
@@ -423,13 +483,40 @@ All timing constraints are met at 142.857 MHz.
 
 About half the LUTs and flip-flops belong to the AXI SmartConnect rather than the chip. The chip needs no external pins: everything goes over the processor's internal AXI port.
 
+### DMA system on the board
+
+`top_axis` with an AXI DMA, two interconnects (one for the processor to control the DMA, one for the DMA to reach DDR memory through `S_AXI_HP0`) and a reset block. Vivado timed it at 150 MHz:
+
+| Check | Worst slack |
+|---|---|
+| Setup (WNS) | **+0.035 ns** |
+| Hold (WHS) | +0.051 ns |
+| Pulse width (WPWS) | +2.083 ns |
+
+On the board, PYNQ 2.5 sets the logic clock from the real 50 MHz crystal and runs it at **125 MHz**, slower than the 150 MHz that timing was checked at. (This project's Zynq block was configured without the board preset. With it applied, the clock would be 142.857 MHz.)
+
 ## Performance on the board
 
-All numbers are measured on the PYNQ-Z2 with `board/bench.py`. It runs the same 514 sentences three ways, each reading the same exported model files:
+All numbers are measured on the PYNQ-Z2 with `board/bench.py`, on the 514 sentences in `vectors.txt` (average length 40 bytes). Every version reads the same exported model files:
 
 - **ARM Python:** plain Python on the board's ARM Cortex-A9 (650 MHz), one byte at a time
 - **ARM NumPy:** all trigrams of a sentence hashed and summed at once
 - **FPGA via AXI-Lite:** the chip, driven from Python: one register write per byte, then polling for the result
+- **FPGA via DMA:** the chip behind `top_axis`, with a whole batch of sentences in one DMA transfer
+
+### Summary
+
+| Version | Time per sentence | vs ARM Python |
+|---|---|---|
+| ARM Python | ≈ 440 µs | 1× |
+| ARM NumPy | ≈ 490 µs | 0.9× |
+| FPGA via AXI-Lite | 1,285 µs | **0.3×** |
+| **FPGA via DMA**, batch of 4112 sentences | **8.9 µs** | **≈ 50×** |
+| FPGA core alone | ≈ 0.3 µs | ≈ 1,300× |
+
+The chip and the model are the same in both FPGA versions. Moving from one register write per byte to one DMA transfer per batch made it about **145× faster per sentence**.
+
+### AXI4-Lite version
 
 All three agree on every sentence (class, argmax and all four scores):
 
@@ -439,9 +526,7 @@ ARM NumPy        514 sentences, 0 errors
 FPGA             514 sentences, 0 errors
 ```
 
-### Results
-
-Per sentence (average length about 40 bytes), best of 3 runs:
+Per sentence, best of 3 runs:
 
 | Version | Median time | Throughput | vs ARM Python |
 |---|---|---|---|
@@ -450,8 +535,6 @@ Per sentence (average length about 40 bytes), best of 3 runs:
 | **FPGA via AXI-Lite** (end to end, from Python) | **1,285 µs** | 0.03 MB/s | **0.3×** |
 | **FPGA core** (length + 9 cycles at 142.857 MHz) | **0.34 µs** | 117 MB/s | **≈ 1,300×** |
 
-### What it shows
-
 **The chip computes about 1,300× faster than the ARM, but end to end it is about 3× slower.**
 
 The FPGA's 1,285 µs per sentence works out to about **32 µs per byte**, while the chip itself needs **7 ns per byte** (one clock cycle). More than 99.9% of the time goes on Python writing one byte at a time to an AXI4-Lite register. The chip spends almost all of it idle, waiting for the next byte.
@@ -459,6 +542,38 @@ The FPGA's 1,285 µs per sentence works out to about **32 µs per byte**, while 
 NumPy is slightly slower than plain Python here because the sentences are short. Its fixed cost per call (creating arrays, indexing) outweighs what it saves on about 40 bytes.
 
 This is the memory wall from the [Inspiration](#inspiration-cerebras-and-the-memory-wall) section again, one level out. The weights are on-chip and the compute is fast, so the bottleneck has moved to **getting the input into the chip**. The design only pays off when data reaches it as fast as it can process it.
+
+### AXI-Stream + DMA version
+
+All batches give **0 errors** on class and argmax (the full 514, and batches of 1, 2, 7 and 50).
+
+Timing by batch size, best of 5 runs, logic clock 125 MHz. The 4112-sentence batch is the vector set repeated 8 times.
+
+| Batch | Bytes | ARM Python | ARM NumPy | FPGA via DMA | DMA per sentence | vs ARM Python | Chip alone |
+|---|---|---|---|---|---|---|---|
+| 1 | 51 | 533 µs | 976 µs | 1,143 µs | 1,143 µs | 0.5× | 0.5 µs |
+| 10 | 494 | 5,086 µs | 4,864 µs | 1,209 µs | 121 µs | 4.2× | 4.0 µs |
+| 100 | 4,237 | 45.4 ms | 48.4 ms | 1.92 ms | 19.2 µs | 24× | 34 µs |
+| 514 | 20,551 | 224 ms | 248 ms | 5.31 ms | 10.3 µs | 42× | 165 µs |
+| 4112 | 164,408 | 1,815 ms | 2,190 ms | 36.5 ms | 8.9 µs | **50×** | 1.3 ms |
+
+The DMA time covers the whole call as a user makes it: encoding the batch in Python, both transfers, and decoding the results.
+
+**Each call has a fixed cost of about 1.1 ms.** A batch of 1 and a batch of 10 take almost the same time, so nearly all of it is Python, PYNQ 2.5's DMA driver, cache maintenance and polling, not the chip. That makes a single sentence about 2× slower than the ARM. The DMA breaks even at about 3 sentences per call, and pulls further ahead as batches grow.
+
+**For large batches, Python is now the bottleneck.** Breakdown of the 4112-sentence batch:
+
+| Step | Time | Share |
+|---|---|---|
+| encoding the batch in Python (16-bit words, sentence-end flags) | 30.0 ms | 82% |
+| DMA transfers, including driver overhead and cache flush | 6.2 ms | 17% |
+| the chip itself | 1.3 ms | (overlaps the transfers) |
+
+The transfers move 164 KB at 26.6 MB/s including the per-call overhead, against the chip's 125 MB/s limit at this clock. Building the input array in Python takes about 5× longer than everything else combined.
+
+### What it shows
+
+With AXI4-Lite, getting each byte into the chip was the bottleneck. The DMA removed that, and the bottleneck moved again, to preparing the data in Python. The pattern from the [Inspiration](#inspiration-cerebras-and-the-memory-wall) section repeats at each layer: fast compute only pays off when the data reaches it as fast as it can process it.
 
 ### Hardware limits (core only)
 
@@ -471,5 +586,6 @@ This is the memory wall from the [Inspiration](#inspiration-cerebras-and-the-mem
 
 ### Next: closing the gap
 
-- **AXI-Stream + DMA:** the DMA engine reads a whole buffer of text from memory and streams it in at one byte per clock, so Python makes one call per batch instead of one per byte. The chip already handles back-to-back sentences at full speed (`tb_stream.v`).
-- **Smaller steps:** writing registers through `mmio.array` instead of `mmio.write`, which has less Python overhead, or packing 4 bytes into each AXI write (4× fewer writes).
+- **Find sentence boundaries in hardware:** Python sends plain text with a newline between sentences, as an 8-bit stream. `top_axis` turns each newline into an end-of-sentence flag, so Python's encoding step becomes a single `join`, and half as many bytes cross the DMA.
+- **Lower the fixed cost per call:** non-cacheable DMA buffers (no flush or invalidate), or programming the DMA's registers directly instead of through PYNQ 2.5's driver. This helps small batches most.
+- **Run at 142.857 MHz** by re-applying the board preset in the DMA project (currently 125 MHz).
