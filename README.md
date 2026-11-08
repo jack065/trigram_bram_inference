@@ -84,7 +84,10 @@ The decision is spread over 7 pipeline stages so that each clock cycle does only
 | `rtl/exp_rom.v` | 2048 × 16-bit exp lookup table ROM, using the block RAM's output register (2-cycle read) |
 | `rtl/classify.v` | 7-stage decision pipeline: argmax, exp LUT confidence, threshold → `cls` |
 | `rtl/top.v` | Connects `trigram`, `accum` and `classify` |
-| `tb/` | One testbench per module, plus `tb_vectors.v` (full regression, one sentence at a time) and `tb_stream.v` (full regression with sentences streaming back to back) |
+| `rtl/top_axi.v` | AXI4-Lite wrapper around `top`, so the Zynq's ARM processor can send text and read results (see [Register map](#register-map)) |
+| `tb/` | One testbench per module, plus `tb_vectors.v` (full regression, one sentence at a time), `tb_stream.v` (full regression with sentences streaming back to back) and `tb_axi.v` (the AXI4-Lite wrapper, driven like the ARM would) |
+| `board/bram_chip.py` | Python driver for the PYNQ-Z2: loads the bitstream, sends sentences, reads results, runs the regression on hardware |
+| `board/bench.py` | Benchmark: the same model in plain Python, in NumPy, and on the FPGA, checked for identical answers and timed |
 | `build.tcl` | Recreates the Vivado project: part, sources, include directory, constraint, out-of-context synthesis |
 | `timing.xdc` | Clock constraint (150 MHz) |
 | `clinc150/` | CLINC150 dataset |
@@ -139,6 +142,10 @@ vvp sim_vec
 # Streaming regression: the same sentences sent back to back without waiting
 iverilog -o sim_str rtl/trigram.v rtl/weight_rom.v rtl/accum.v rtl/exp_rom.v rtl/classify.v rtl/top.v tb/tb_stream.v
 vvp sim_str
+
+# AXI4-Lite wrapper (self-checking: prints ALL TESTS PASSED)
+iverilog -o sim_axi rtl/trigram.v rtl/weight_rom.v rtl/accum.v rtl/exp_rom.v rtl/classify.v rtl/top.v rtl/top_axi.v tb/tb_axi.v
+vvp sim_axi
 ```
 
 The two regressions are the main checks. Expected output:
@@ -193,6 +200,65 @@ report_utilization -hierarchical
 
 `vivado_bram_chip/` is generated output: logs, checkpoints, caches. It can always be rebuilt from `build.tcl`, so it's listed in `.gitignore`.
 
+### 4. Run on the PYNQ-Z2
+
+#### Build the board design in Vivado
+
+A separate Vivado project, targeting the **PYNQ-Z2 board** (the PYNQ-Z2 board files are needed for this one):
+
+1. Add the files from `rtl/` (including `top_axi.v`) and `hw/`, and set the repository root as the Verilog include directory. Don't add `timing.xdc`: the clock comes from the processor.
+2. Create a block design and add the **ZYNQ7 Processing System**. Run **Block Automation** with the board preset.
+3. In the Zynq settings, set **FCLK_CLK0** to 150 MHz. The processor derives it from its 1000 MHz IO PLL, so the actual clock is **142.857 MHz** (÷7).
+4. **Add Module → `top_axi`**, then **Run Connection Automation**. This adds an AXI SmartConnect between the processor's `M_AXI_GP0` port and `top_axi`'s `s_axi` interface, plus a reset block.
+5. Validate the design, **Create HDL Wrapper**, set the wrapper as top, and generate the bitstream.
+
+"Add Module" reports that it can't open `hw/model_params.vh`. That only affects how the block is drawn; synthesis itself uses the include directory and finds the file.
+
+#### Copy the files to the board
+
+Two files from the Vivado project, renamed to the same base name:
+- `<project>.runs/impl_1/design_1_wrapper.bit` → `bram_chip.bit`
+- `<project>.gen/sources_1/bd/design_1/hw_handoff/design_1.hwh` → `bram_chip.hwh`
+
+Then copy them into one folder on the board, together with `board/bram_chip.py`, `board/bench.py` and the files in `hw/` (`vectors.txt`, `weights.mem`, `bias.mem`, `exp_lut.mem`, `model_params.vh`). Use Jupyter's Upload button, or the network share `\\<board IP>\xilinx` (user and password `xilinx`).
+
+With the board's Ethernet port plugged into your router, Jupyter is at `http://<board IP>:9090` (password `xilinx`). Your router's list of connected devices shows the board's address.
+
+#### Use it from Python
+
+```python
+from bram_chip import BramChip, run_regression, LABELS
+
+chip = BramChip("bram_chip.bit")      # programs the FPGA and soft-resets the chip
+cls, argmax, accs, cycles = chip.classify("Book me a flight from Boston to Denver next Friday.")
+print(LABELS[cls], accs)              # book_flight [674, -71, -557, -49]
+
+run_regression(chip)                  # 514 sentences, 0 errors on real hardware
+```
+
+Loading the bitstream programs the FPGA directly from Python, with no separate flashing step. The FPGA forgets the design when the board loses power, so create `BramChip` again after a restart.
+
+To compare the ARM CPU with the FPGA (see [Performance](#performance-on-the-board)):
+
+```python
+import bench
+results = bench.run(chip)
+```
+
+#### Register map
+
+`top_axi` appears to the processor as eight 32-bit registers. PYNQ finds its base address from the `.hwh` file (`ip_dict['top_axi_0/s_axi']`).
+
+| Offset | Access | Contents |
+|---|---|---|
+| `0x00` | write | **DATA:** [7:0] byte, [8] last byte of the sentence. Each write sends one byte into the chip. |
+| `0x04` | read | **STATUS:** [0] result ready, [2:1] class, [4:3] argmax |
+| `0x08`–`0x14` | read | the four class scores (signed, 32-bit), captured when the sentence finishes |
+| `0x18` | write | **CONTROL:** [0] soft reset, [1] clear "result ready" |
+| `0x1C` | read | **CYCLES:** clock cycles from the first byte to the result |
+
+The chip's `cls_valid` lasts only one clock cycle, so the wrapper latches each result and holds "result ready" until Python clears it. A sentence goes: clear, write each byte, poll STATUS, read the result.
+
 ## Status
 
 - [x] Train and quantize the model, export the memory files
@@ -208,11 +274,14 @@ report_utilization -hierarchical
 - [x] Streaming regression (`tb/tb_stream.v`) at one byte per clock, with directed overlap tests and a mutation check
 - [x] `` `default_nettype none `` in all RTL files, so a misspelled port connection is a compile error instead of a silent new wire
 - [x] Synthesized and implemented for the PYNQ-Z2 (out-of-context): all ROMs in block RAM, timing met at 150 MHz (see [Synthesis results](#synthesis-results))
+- [x] AXI4-Lite wrapper (`rtl/top_axi.v`), verified in simulation through the bus alone (`tb/tb_axi.v`)
+- [x] Running on the PYNQ-Z2 with the Zynq's ARM processor: 514 sentences, 0 errors on real hardware
+- [x] ARM vs FPGA benchmark on the board (`board/bench.py`)
 
 ## TODO
 
-- [ ] **Board interface:** wrap `top` in an AXI interface so the Zynq's ARM cores (and Python on PYNQ) can send text and read the class
-- [ ] **Python vs hardware benchmark:** a cycle-counting testbench (`tb_perf.v`) and a Python timing script (`bench.py`) on the same sentences
+- [ ] **AXI-Stream + DMA interface:** stream whole buffers of text into the chip at one byte per clock, instead of one AXI4-Lite write per byte (see [Performance](#performance-on-the-board))
+- [ ] A build script for the board project (block design, board files, include directory), like `build.tcl` for the out-of-context build
 - [ ] **Try 200 MHz:** run at a 5 ns clock and fix the slowest paths (likely candidates: the weight BRAM output register, splitting S5, narrower accumulators)
 - [ ] Make `tb_top.v` and `tb_accum.v` self-checking (PASS/FAIL instead of printed values)
 - [ ] Cleanup: shrink `count` in `trigram.v` to 2 bits, and rename the instances in `top.v` (`rom1`/`rom2`/`rom3`)
@@ -282,7 +351,11 @@ These estimates assume int8 weights and ideal packing at about 4 KB of 8-bit dat
 
 ## Synthesis results
 
-Target: the PYNQ-Z2's Zynq XC7Z020 (`xc7z020clg400-1`, the slowest speed grade), with Vivado 2025.2. `top` is built **out of context**: its ports stay internal, because its 146 ports are more than the board's user I/O, and on the real board it will sit behind an AXI interface. The only constraint is the clock:
+Target: the PYNQ-Z2's Zynq XC7Z020 (`xc7z020clg400-1`, the slowest speed grade), with Vivado 2025.2.
+
+### The chip on its own (out of context)
+
+`top` is built **out of context**: its ports stay internal, because its 146 ports are more than the board's user I/O. On the board it sits behind the AXI4-Lite wrapper instead (see [below](#full-system-on-the-board)). The only constraint is the clock:
 
 ```
 create_clock -period 6.667 [get_ports clk]    # 150 MHz
@@ -290,7 +363,7 @@ create_clock -period 6.667 [get_ports clk]    # 150 MHz
 
 To reproduce these results, see [Synthesize in Vivado](#3-synthesize-in-vivado-optional).
 
-### Timing (post-implementation)
+#### Timing (post-implementation)
 
 | Check | Worst slack | Meaning |
 |---|---|---|
@@ -300,7 +373,7 @@ To reproduce these results, see [Synthesize in Vivado](#3-synthesize-in-vivado-o
 
 All timing constraints are met at **150 MHz**. The slowest path takes about 6.2 ns, so roughly 160 MHz is the current limit.
 
-### Resources
+#### Resources
 
 | Resource | Used | Available | Share |
 |---|---|---|---|
@@ -319,7 +392,7 @@ Most of the flip-flops are pipeline registers in `classify`: saved copies of the
 
 The 4 block RAMs hold the weight table (2 RAMB36) and the 4 exp LUT copies. Vivado packs those into 2 RAMB36 by serving two copies from each block RAM's two ports.
 
-### How timing was closed
+#### How timing was closed
 
 The first full build reached only about 126 MHz. Each fix followed the same rule: shorten the slowest path, and keep every value moving one stage per edge.
 
@@ -328,23 +401,75 @@ The first full build reached only about 126 MHz. Each fix followed the same rule
 3. **Cheaper clamp.** Because the differences are never negative, `diff > 2047` is the same as "any of bits 31..11 is set", a small OR tree instead of a carry-chain compare.
 4. **S3 split in two.** The subtraction and the clamp each get their own cycle. Cost: 1 cycle.
 
-## Performance modelling
+### Full system on the board
 
-*Python comparison coming soon.*
+`top_axi` in a block design with the Zynq processor, an AXI SmartConnect and a reset block. The logic clock is `FCLK_CLK0`: requested 150 MHz, actual **142.857 MHz** (7.0 ns).
 
-### Hardware (from the design and simulation, at 150 MHz)
-
-| Metric | Value |
+| Check | Worst slack |
 |---|---|
-| Throughput | 1 byte per clock → **150 MB/s** of text |
-| Latency after the last byte | 10 cycles → **≈ 67 ns** |
-| Latency for a whole sentence | (length + 9) cycles. A 50-byte sentence takes ≈ 393 ns. |
-| Weight reads | one 32-bit word (4 weights) per byte → 600 MB/s from block RAM |
+| Setup (WNS) | **+0.253 ns** |
+| Hold (WHS) | +0.011 ns |
+| Pulse width (WPWS) | +2.520 ns |
 
-These numbers cover the core only. On the board, moving bytes from the ARM CPU over AXI adds its own overhead.
+All timing constraints are met at 142.857 MHz.
 
-### Still to do
+| Resource | Used | Available | Share |
+|---|---|---|---|
+| Block RAM (RAMB36) | 4 | 140 | 2.9% |
+| LUTs | 1,038 | 53,200 | 2.0% |
+| Flip-flops | 1,475 | 106,400 | 1.4% |
+| DSP | 0 | 220 | 0% |
+| User I/O pins | 0 | 125 | 0% |
 
-- a cycle-counting testbench (`tb_perf.v`) to confirm these numbers on all 514 sentences
-- the same model timed in Python on a CPU (`bench.py`), where the weights come from main memory
-- the same Python script on the PYNQ board's own ARM CPU, the processor this chip would be helping
+About half the LUTs and flip-flops belong to the AXI SmartConnect rather than the chip. The chip needs no external pins: everything goes over the processor's internal AXI port.
+
+## Performance on the board
+
+All numbers are measured on the PYNQ-Z2 with `board/bench.py`. It runs the same 514 sentences three ways, each reading the same exported model files:
+
+- **ARM Python:** plain Python on the board's ARM Cortex-A9 (650 MHz), one byte at a time
+- **ARM NumPy:** all trigrams of a sentence hashed and summed at once
+- **FPGA via AXI-Lite:** the chip, driven from Python: one register write per byte, then polling for the result
+
+All three agree on every sentence (class, argmax and all four scores):
+
+```
+ARM Python       514 sentences, 0 errors
+ARM NumPy        514 sentences, 0 errors
+FPGA             514 sentences, 0 errors
+```
+
+### Results
+
+Per sentence (average length about 40 bytes), best of 3 runs:
+
+| Version | Median time | Throughput | vs ARM Python |
+|---|---|---|---|
+| ARM Python | 433 µs | 0.09 MB/s | 1.0× |
+| ARM NumPy | 491 µs | 0.08 MB/s | 0.9× |
+| **FPGA via AXI-Lite** (end to end, from Python) | **1,285 µs** | 0.03 MB/s | **0.3×** |
+| **FPGA core** (length + 9 cycles at 142.857 MHz) | **0.34 µs** | 117 MB/s | **≈ 1,300×** |
+
+### What it shows
+
+**The chip computes about 1,300× faster than the ARM, but end to end it is about 3× slower.**
+
+The FPGA's 1,285 µs per sentence works out to about **32 µs per byte**, while the chip itself needs **7 ns per byte** (one clock cycle). More than 99.9% of the time goes on Python writing one byte at a time to an AXI4-Lite register. The chip spends almost all of it idle, waiting for the next byte.
+
+NumPy is slightly slower than plain Python here because the sentences are short. Its fixed cost per call (creating arrays, indexing) outweighs what it saves on about 40 bytes.
+
+This is the memory wall from the [Inspiration](#inspiration-cerebras-and-the-memory-wall) section again, one level out. The weights are on-chip and the compute is fast, so the bottleneck has moved to **getting the input into the chip**. The design only pays off when data reaches it as fast as it can process it.
+
+### Hardware limits (core only)
+
+| Metric | Value at 142.857 MHz |
+|---|---|
+| Throughput | 1 byte per clock → **≈ 143 MB/s** of text |
+| Latency after the last byte | 10 cycles → **70 ns** |
+| Latency for a whole sentence | (length + 9) cycles. A 50-byte sentence takes ≈ 413 ns. |
+| Weight reads | one 32-bit word (4 weights) per byte → ≈ 571 MB/s from block RAM |
+
+### Next: closing the gap
+
+- **AXI-Stream + DMA:** the DMA engine reads a whole buffer of text from memory and streams it in at one byte per clock, so Python makes one call per batch instead of one per byte. The chip already handles back-to-back sentences at full speed (`tb_stream.v`).
+- **Smaller steps:** writing registers through `mmio.array` instead of `mmio.write`, which has less Python overhead, or packing 4 bytes into each AXI write (4× fewer writes).

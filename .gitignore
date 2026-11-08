@@ -2,3 +2,4 @@ sim_*
 *.vcd
 __pycache__/
 vivado_bram_chip/
+bram_axi_bus/
